@@ -1,13 +1,16 @@
-from collections import namedtuple
-from dataclasses import dataclass
-from functools import partial, wraps
+from functools import partial
 from typing import Optional
 
 import torch
+from torch import nn, einsum, Tensor
 import torch.nn.functional as F
-from einops import rearrange, repeat
+
+from collections import namedtuple
+from functools import wraps
 from packaging import version
-from torch import Tensor, einsum, nn
+from dataclasses import dataclass
+
+from einops import rearrange
 
 # constants
 
@@ -221,18 +224,9 @@ class Attend(nn.Module):
         d - feature dimension
         """
 
-        n, heads, kv_heads, device = q.shape[-2], q.shape[1], k.shape[1], q.device
+        n, device = q.shape[-2], q.device
 
         scale = default(self.scale, q.shape[-1] ** -0.5)
-
-        # handle grouped multi-query attention
-
-        if kv_heads == 1:
-            k, v = map(lambda t: rearrange(t, 'b 1 n d -> b n d'), (k, v))
-        elif kv_heads < heads:
-            k, v = map(lambda t: repeat(t, 'b kvh n d -> b (r kvh) n d', r = heads // kv_heads), (k, v))
-
-        # handle zero kv, as means for allowing network to attend to nothing
 
         if self.add_zero_kv:
             k, v = map(lambda t: F.pad(t, (0, 0, 1, 0), value = 0.), (k, v))

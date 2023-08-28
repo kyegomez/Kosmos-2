@@ -1,18 +1,166 @@
 import math
-from random import random
-
-import torch
-from torch import nn, einsum, Tensor
-import torch.nn.functional as F
-
+from dataclasses import dataclass
 from functools import partial, wraps
 from inspect import isfunction
-from dataclasses import dataclass
+
+# constants
+from math import ceil
+from random import random
 from typing import Callable, List, Optional
 
-from einops import rearrange, repeat, reduce
+import torch
+import torch.nn.functional as F
+from einops import pack, rearrange, reduce, repeat, unpack
+from torch import Tensor, einsum, nn
 
 from kosmos.attend import Attend, Intermediates
+
+
+def exists(val):
+    return val is not None
+
+def eval_decorator(fn):
+    def inner(self, *args, **kwargs):
+        was_training = self.training
+        self.eval()
+        out = fn(self, *args, **kwargs)
+        self.train(was_training)
+        return out
+    return inner
+
+# nucleus
+
+def top_p(logits, thres = 0.9):
+    sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+    cum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+
+    sorted_indices_to_remove = cum_probs > (1 - thres)
+    sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
+    sorted_indices_to_remove[:, 0] = 0
+
+    sorted_logits[sorted_indices_to_remove] = float('-inf')
+    return sorted_logits.scatter(1, sorted_indices, sorted_logits)
+
+# topk
+
+def top_k(logits, thres = 0.9):
+    k = ceil((1 - thres) * logits.shape[-1])
+    val, ind = torch.topk(logits, k)
+    probs = torch.full_like(logits, float('-inf'))
+    probs.scatter_(1, ind, val)
+    return probs
+
+# top_a
+
+def top_a(logits, min_p_pow=2.0, min_p_ratio=0.02):
+    probs = F.softmax(logits, dim=-1)
+    limit = torch.pow(torch.max(probs), min_p_pow) * min_p_ratio
+    logits[probs < limit] = float('-inf')
+    logits[probs >= limit] = 1
+    return logits
+
+# autoregressive wrapper class
+
+class AutoregressiveWrapper(nn.Module):
+    def __init__(
+        self,
+        net,
+        ignore_index = -100,
+        pad_value = 0,
+        mask_prob = 0.
+    ):
+        super().__init__()
+        self.pad_value = pad_value
+        self.ignore_index = ignore_index
+
+        self.net = net
+        self.max_seq_len = net.max_seq_len
+
+        # paper shows masking (MLM) in conjunction with autoregressive decoder-only training leads to big improvements https://arxiv.org/abs/2210.13432
+        assert mask_prob < 1.
+        self.mask_prob = mask_prob
+
+    @torch.no_grad()
+    @eval_decorator
+    def generate(
+        self,
+        start_tokens,
+        seq_len,
+        eos_token = None,
+        temperature = 1.,
+        filter_logits_fn = top_k,
+        filter_thres = 0.9,
+        min_p_pow = 2.0,
+        min_p_ratio = 0.02,
+        **kwargs
+    ):
+
+        start_tokens, ps = pack([start_tokens], '* n')
+
+        b, t = start_tokens.shape
+
+        out = start_tokens
+
+        for _ in range(seq_len):
+            x = out[:, -self.max_seq_len:]
+
+            logits = self.net(x, **kwargs)[:, -1]
+
+            if filter_logits_fn in {top_k, top_p}:
+                filtered_logits = filter_logits_fn(logits, thres = filter_thres)
+                probs = F.softmax(filtered_logits / temperature, dim=-1)
+
+            elif filter_logits_fn is top_a:
+                filtered_logits = filter_logits_fn(logits, min_p_pow = min_p_pow, min_p_ratio= min_p_ratio)
+                probs = F.softmax(filtered_logits / temperature, dim=-1)
+
+            sample = torch.multinomial(probs, 1)
+
+            out = torch.cat((out, sample), dim=-1)
+
+            if exists(eos_token):
+                is_eos_tokens = (out == eos_token)
+
+                if is_eos_tokens.any(dim = -1).all():
+                    # mask out everything after the eos tokens
+                    shifted_is_eos_tokens = F.pad(is_eos_tokens, (1, -1))
+                    mask = shifted_is_eos_tokens.float().cumsum(dim = -1) >= 1
+                    out = out.masked_fill(mask, self.pad_value)
+                    break
+
+        out = out[:, t:]
+
+        out, = unpack(out, ps, '* n')
+
+        return out
+
+    def forward(self, x, return_loss=True, **kwargs):
+        seq, ignore_index = x.shape[1], self.ignore_index
+
+        inp, target = x[:, :-1], x[:, 1:]
+
+        if self.mask_prob > 0.:
+            rand = torch.randn(inp.shape, device = x.device)
+            rand[:, 0] = -torch.finfo(rand.dtype).max # first token should not be masked out
+            num_mask = min(int(seq * self.mask_prob), seq - 1)
+            indices = rand.topk(num_mask, dim = -1).indices
+            mask = ~torch.zeros_like(inp).scatter(1, indices, 1.).bool()
+            kwargs.update(self_attn_context_mask = mask)
+
+        logits = self.net(inp, **kwargs)
+
+        loss = F.cross_entropy(
+            rearrange(logits, 'b n c -> b c n'),
+            target,
+            ignore_index = ignore_index
+        )
+
+        if return_loss:
+            return logits, loss
+
+        return logits
+
+
 
 DEFAULT_DIM_HEAD = 64
 
@@ -35,9 +183,6 @@ def default(val, d):
 
 def cast_tuple(val, depth):
     return val if isinstance(val, tuple) else (val,) * depth
-
-def divisible_by(num, den):
-    return (num % den) == 0
 
 def maybe(fn):
     @wraps(fn)
@@ -234,7 +379,7 @@ class AbsolutePositionalEmbedding(nn.Module):
 class ScaledSinusoidalEmbedding(nn.Module):
     def __init__(self, dim, theta = 10000):
         super().__init__()
-        assert divisible_by(dim, 2)
+        assert (dim % 2) == 0
         self.scale = nn.Parameter(torch.ones(1) * dim ** -0.5)
 
         half_dim = dim // 2
@@ -466,8 +611,7 @@ class Scale(nn.Module):
 
     def forward(self, x, **kwargs):
         out = self.fn(x, **kwargs)
-        def scale_fn(t):
-            return t * self.value
+        scale_fn = lambda t: t * self.value
 
         if not isinstance(out, tuple):
             return scale_fn(out)
@@ -656,7 +800,6 @@ class Attention(nn.Module):
         qk_norm_scale = 10,
         qk_norm_dim_scale = False,
         one_kv_head = False,
-        kv_heads = None,
         shared_kv = False,
         value_dim_head = None,
         tensor_product = False,   # https://arxiv.org/abs/2208.06061
@@ -671,21 +814,15 @@ class Attention(nn.Module):
         self.causal = causal
         self.max_attend_past = max_attend_past
 
-
-        assert not (exists(kv_heads) and one_kv_head), 'either attn_one_kv_head is set to True (in which case kv_heads is set to 1), or attn_kv_heads is set, but not both'
-
         value_dim_head = default(value_dim_head, dim_head)
-        kv_heads = default(kv_heads, heads)
+        q_dim = k_dim = dim_head * heads
+        v_dim = out_dim = value_dim_head * heads
 
-        kv_heads = 1 if one_kv_head else kv_heads
-        assert divisible_by(heads, kv_heads)
-
-        self.kv_heads = kv_heads
-
-        q_dim = dim_head * heads
-        k_dim = dim_head * kv_heads
-        v_dim = value_dim_head * kv_heads
-        out_dim = value_dim_head * heads
+        self.one_kv_head = one_kv_head
+        if one_kv_head:
+            k_dim = dim_head
+            v_dim = value_dim_head
+            out_dim = v_dim * heads
 
         self.to_q = nn.Linear(dim, q_dim, bias = False)
         self.to_k = nn.Linear(dim, k_dim, bias = False)
@@ -717,7 +854,7 @@ class Attention(nn.Module):
             self.qk_norm_q_scale = nn.Parameter(torch.ones(dim_head))
             self.qk_norm_k_scale = nn.Parameter(torch.ones(dim_head))
 
-        assert (not qk_norm) or divisible_by(dim_head, qk_norm_groups), 'dimension per attention head must be divisible by the qk norm groups'
+        assert (not qk_norm) or (dim_head % qk_norm_groups) == 0, 'dimension per attention head must be divisible by the qk norm groups'
         assert not (qk_norm and (dim_head // qk_norm_groups) <= 2), 'the group dimension may be too small (2 was too small in my tests, but 4 still works, surprisingly)'
 
         # attend class - includes core attention algorithm + talking heads
@@ -769,7 +906,7 @@ class Attention(nn.Module):
         prev_attn = None,
         mem = None
     ):
-        b, n, _, h, kv_h, head_scale, device, has_context = *x.shape, self.heads, self.kv_heads, self.head_scale, x.device, exists(context)
+        b, n, _, h, head_scale, device, has_context = *x.shape, self.heads, self.head_scale, x.device, exists(context)
         kv_input = default(context, x)
 
         q_input = x
@@ -788,11 +925,13 @@ class Attention(nn.Module):
 
         q = rearrange(q, 'b n (h d) -> b h n d', h = h)
 
-        k, v, r = map(lambda t: maybe(rearrange)(t, 'b n (h d) -> b h n d', h = kv_h), (k, v, r))
+        if not self.one_kv_head:
+            k, v, r = map(lambda t: maybe(rearrange)(t, 'b n (h d) -> b h n d', h = h), (k, v, r))
 
         if self.qk_norm:
             qk_l2norm = partial(l2norm, groups = self.qk_norm_groups)
             q, k = map(qk_l2norm, (q, k))
+            scale = self.qk_norm_scale
 
             q = q * self.qk_norm_q_scale
             k = k * self.qk_norm_k_scale
@@ -826,7 +965,7 @@ class Attention(nn.Module):
 
         # determine masking
 
-        max_neg_value(q)
+        mask_value = max_neg_value(q)
         masks = []
         final_attn_mask = None
 
@@ -1083,7 +1222,7 @@ class AttentionLayers(nn.Module):
         # iterate and construct layers
 
         for ind, (layer_type, layer_shift_tokens) in enumerate(zip(self.layer_types, shift_tokens)):
-            ind == (len(self.layer_types) - 1)
+            is_last_layer = ind == (len(self.layer_types) - 1)
 
             if layer_type == 'a':
                 layer = Attention(dim, heads = heads, causal = causal, **attn_kwargs)
@@ -1153,7 +1292,7 @@ class AttentionLayers(nn.Module):
         outer_residual = x * self.resi_dual_scale
 
         for ind, (layer_type, (norm, block, residual_fn), layer_dropout) in enumerate(zip(self.layer_types, self.layers, self.layer_dropouts)):
-            ind == (len(self.layers) - 1)
+            is_last = ind == (len(self.layers) - 1)
 
             if self.training and layer_dropout > 0. and random() < layer_dropout:
                 continue
@@ -1250,7 +1389,7 @@ class ViTransformerWrapper(nn.Module):
     ):
         super().__init__()
         assert isinstance(attn_layers, Encoder), 'attention layers must be an Encoder'
-        assert divisible_by(image_size, patch_size), 'image dimensions must be divisible by the patch size'
+        assert image_size % patch_size == 0, 'image dimensions must be divisible by the patch size'
         dim = attn_layers.dim
         num_patches = (image_size // patch_size) ** 2
         patch_dim = channels * patch_size ** 2
