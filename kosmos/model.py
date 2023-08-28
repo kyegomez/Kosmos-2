@@ -71,6 +71,7 @@ class Kosmos2Tokenizer:
 
 
 
+
 class Kosmos2(torch.nn.Module):
     def __init__(self, 
                  image_size=256, 
