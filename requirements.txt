@@ -8,7 +8,7 @@ wandb
 lion-pytorch
 
 bitsandbytes
-flamingo_pytorch
+flamingo-pytorch
 pillow
 accelerate
 
