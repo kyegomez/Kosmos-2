@@ -91,7 +91,7 @@ class Kosmos2(Module):
                  alibi_num_heads=12, 
                  rotary_xpos=True,
                  attn_flash=True, 
-                 attn_kv_heads = 2,
+                #  attn_kv_heads = 2,
                  qk_norm=True, 
                  attn_qk_norm=True, 
                  attn_qk_norm_dim_scale=True, 
@@ -157,7 +157,7 @@ class Kosmos2(Module):
                     alibi_num_heads=alibi_num_heads,
                     rotary_xpos=rotary_xpos,
                     attn_flash=attn_flash,
-                    attn_kv_heads=attn_kv_heads,
+                    # attn_kv_heads=attn_kv_heads,
                     qk_norm=qk_norm,
                     attn_qk_norm=attn_qk_norm,
                     attn_qk_norm_dim_scale=attn_qk_norm_dim_scale
