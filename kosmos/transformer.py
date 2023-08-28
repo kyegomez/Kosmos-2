@@ -14,7 +14,7 @@ from einops import pack, rearrange, reduce, repeat, unpack
 from torch import Tensor, einsum, nn
 
 from kosmos.attend import Attend, Intermediates
-from zeta.nn import MultiwayEmbeddings
+# from zeta.nn import MultiwayEmbeddings
 
 def exists(val):
     return val is not None
