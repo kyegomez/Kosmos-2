@@ -181,8 +181,8 @@ class Kosmos2(Module):
         """
         try:
             images = self.clip_model(pixel_values=images)["last_hidden_state"]
-            images = self.perceive(images).squeeze(1)
-            images = self.image_proj(images)
+            # images = self.perceive(images).squeeze(1)
+            # images = self.image_proj(images)
 
             model_input = self.decoder.forward(text, context=images)[0]
             return self.decoder(model_input, padded_x=model_input[0])
