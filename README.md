@@ -83,19 +83,6 @@ For more information, refer to the [Training SOP](DOCs/TRAINING.md).
 
 # Citations
 
-Please use the following to cite this work:
+To cite this paper in markdown format:
 
-```latex
-@article{bai2023kosmos,
-  title={Qwen-VL: A Frontier Large Vision-Language Model with Versatile Abilities},
-  author={Bai, Jinze and Bai, Shuai and Yang, Shusheng and Wang, Shijie and Tan, Sinan and Wang, Peng and Lin, Junyang and Zhou, Chang and Zhou, Jingren},
-  journal={arXiv preprint arXiv:2308.12966},
-  year={2023},
-  url={https://doi.org/10.48550/arXiv.2308.12966}
-}
-
-```
-
-For more details, please refer to the [full paper](https://doi.org/10.48550/arXiv.2308.12966).
-
-
+Shaohan Huang, Li Dong, Wenhui Wang, Yaru Hao, Saksham Singhal, Shuming Ma, Tengchao Lv, Lei Cui, Owais Khan Mohammed, Barun Patra, Qiang Liu, Kriti Aggarwal, Zewen Chi, Johan Bjorck, Vishrav Chaudhary, Subhojit Som, Xia Song, Furu Wei. "Language Is Not All You Need: Aligning Perception with Language Models." arXiv:2302.14045 [cs.CL], 1 Mar 2023, https://doi.org/10.48550/arXiv.2302.14045.
