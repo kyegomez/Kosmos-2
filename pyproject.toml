@@ -28,5 +28,6 @@ datasets = "*"
 matplotlib = "*"
 deepspeed = "*"
 flamingo-pytorch = "*"
+zetascale = "*"
 
 [tool.poetry.dev-dependencies]
